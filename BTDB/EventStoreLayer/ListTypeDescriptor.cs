@@ -10,14 +10,14 @@ namespace BTDB.EventStoreLayer
 {
     class ListTypeDescriptor : ITypeDescriptor, IPersistTypeDescriptor
     {
-        readonly TypeSerializers _typeSerializers;
+        readonly ITypeDescriptorCallbacks _typeSerializers;
         Type _type;
         Type _itemType;
         ITypeDescriptor _itemDescriptor;
         string _name;
         readonly ITypeConvertorGenerator _convertorGenerator;
 
-        public ListTypeDescriptor(TypeSerializers typeSerializers, Type type)
+        public ListTypeDescriptor(ITypeDescriptorCallbacks typeSerializers, Type type)
         {
             _convertorGenerator = typeSerializers.ConvertorGenerator;
             _typeSerializers = typeSerializers;
@@ -25,7 +25,7 @@ namespace BTDB.EventStoreLayer
             _itemType = GetItemType(type);
         }
 
-        public ListTypeDescriptor(TypeSerializers typeSerializers, AbstractBufferedReader reader, Func<AbstractBufferedReader, ITypeDescriptor> nestedDescriptorReader)
+        public ListTypeDescriptor(ITypeDescriptorCallbacks typeSerializers, AbstractBufferedReader reader, Func<AbstractBufferedReader, ITypeDescriptor> nestedDescriptorReader)
         {
             _convertorGenerator = typeSerializers.ConvertorGenerator;
             _typeSerializers = typeSerializers;
@@ -147,7 +147,7 @@ namespace BTDB.EventStoreLayer
                 _listTypeDescriptor = listTypeDescriptor;
             }
 
-            public void GenerateTypeIterator(IILGen ilGenerator, Action<IILGen> pushObj, Action<IILGen> pushCtx)
+            public void GenerateTypeIterator(IILGen ilGenerator, Action<IILGen> pushObj, Action<IILGen> pushCtx, Type type)
             {
                 var finish = ilGenerator.DefineLabel();
                 var next = ilGenerator.DefineLabel();
@@ -158,8 +158,8 @@ namespace BTDB.EventStoreLayer
                 ilGenerator
                     .Do(pushObj)
                     .Castclass(localList.LocalType)
-                    .Dup()
                     .Stloc(localList)
+                    .Ldloc(localList)
                     .Callvirt(localList.LocalType.GetInterface("ICollection`1").GetProperty("Count").GetGetMethod())
                     .Stloc(localCount)
                     .LdcI4(0)
@@ -226,12 +226,11 @@ namespace BTDB.EventStoreLayer
             ilGenerator
                 .Do(pushValue)
                 .Castclass(localList.LocalType)
-                .Dup()
                 .Stloc(localList)
+                .Ldloc(localList)
                 .BrtrueS(notnull)
                 .Do(pushWriter)
-                .LdcI4(0)
-                .Callvirt(() => default(AbstractBufferedWriter).WriteVUInt32(0))
+                .Callvirt(() => default(AbstractBufferedWriter).WriteByteZero())
                 .Br(finish)
                 .Mark(notnull)
                 .Ldloc(localList)
@@ -241,7 +240,6 @@ namespace BTDB.EventStoreLayer
                 .Ldloc(localCount)
                 .LdcI4(1)
                 .Add()
-                .ConvU4()
                 .Callvirt(() => default(AbstractBufferedWriter).WriteVUInt32(0))
                 .LdcI4(0)
                 .Stloc(localIndex)

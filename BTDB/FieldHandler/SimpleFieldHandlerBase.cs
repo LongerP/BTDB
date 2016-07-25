@@ -67,6 +67,12 @@ namespace BTDB.FieldHandler
             return new ConvertingHandler(this, type);
         }
 
+        public bool FreeContent(IILGen ilGenerator, Action<IILGen> pushReaderOrCtx)
+        {
+            Skip(ilGenerator, pushReaderOrCtx);
+            return false;
+        }
+
         public class ConvertingHandler : IFieldHandler
         {
             readonly IFieldHandler _fieldHandler;
@@ -120,6 +126,12 @@ namespace BTDB.FieldHandler
             public IFieldHandler SpecializeSaveForType(Type type)
             {
                 throw new InvalidOperationException();
+            }
+
+            public bool FreeContent(IILGen ilGenerator, Action<IILGen> pushReaderOrCtx)
+            {
+                _fieldHandler.Skip(ilGenerator, pushReaderOrCtx);
+                return false;
             }
         }
 

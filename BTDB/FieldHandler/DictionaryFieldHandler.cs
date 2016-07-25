@@ -275,5 +275,33 @@ namespace BTDB.FieldHandler
             yield return _keysHandler;
             yield return _valuesHandler;
         }
+
+        public bool FreeContent(IILGen ilGenerator, Action<IILGen> pushReaderOrCtx)
+        {
+            var needsFreeContent = false;
+            var localCount = ilGenerator.DeclareLocal(typeof(uint));
+            var finish = ilGenerator.DefineLabel();
+            var next = ilGenerator.DefineLabel();
+            ilGenerator
+                .Do(pushReaderOrCtx)
+                .Callvirt(() => ((IReaderCtx)null).SkipObject())
+                .Brfalse(finish)
+                .Do(Extensions.PushReaderFromCtx(pushReaderOrCtx))
+                .Callvirt(() => ((AbstractBufferedReader)null).ReadVUInt32())
+                .Stloc(localCount)
+                .Mark(next)
+                .Ldloc(localCount)
+                .Brfalse(finish)
+                .Ldloc(localCount)
+                .LdcI4(1)
+                .Sub()
+                .ConvU4()
+                .Stloc(localCount)
+                .GenerateFreeContent(_keysHandler, pushReaderOrCtx, ref needsFreeContent)
+                .GenerateFreeContent(_valuesHandler, pushReaderOrCtx, ref needsFreeContent)
+                .Br(next)
+                .Mark(finish);
+            return needsFreeContent;
+        }
     }
 }

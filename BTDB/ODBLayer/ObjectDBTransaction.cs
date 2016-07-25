@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using BTDB.Buffer;
@@ -69,6 +71,19 @@ namespace BTDB.ODBLayer
             tableInfo.GetLoader(tableVersion)(this, null, reader, obj);
             readerCtx.ReadObjectDone();
             return obj;
+        }
+
+        public bool FreeContentInNativeObject(IReaderCtx readerCtx)
+        {
+            var reader = readerCtx.Reader();
+            var tableId = reader.ReadVUInt32();
+            var tableVersion = reader.ReadVUInt32();
+            var tableInfo = _owner.TablesInfo.FindById(tableId);
+            if (tableInfo == null) throw new BTDBException($"Unknown TypeId {tableId} of inline object");
+            EnsureClientTypeNotNull(tableInfo);
+            var freeContentTuple = tableInfo.GetFreeContent(tableVersion);
+            freeContentTuple.Item2(this, null, reader, ((DBReaderWithFreeInfoCtx)readerCtx).DictIds);
+            return freeContentTuple.Item1;
         }
 
         public void WriteInlineObject(object @object, IWriterCtx writerCtx)
@@ -514,7 +529,7 @@ namespace BTDB.ODBLayer
             return id;
         }
 
-        public ulong StoreIfNotInlined(object @object, bool autoRegister)
+        public ulong StoreIfNotInlined(object @object, bool autoRegister, bool preferInline)
         {
             TableInfo ti;
             if (autoRegister)
@@ -544,7 +559,7 @@ namespace BTDB.ODBLayer
                     return metadata.Id;
                 }
             }
-            return ti.StoredInline ? ulong.MaxValue : RegisterNewObject(@object);
+            return (ti.StoredInline || preferInline) ? ulong.MaxValue : RegisterNewObject(@object);
         }
 
         ulong RegisterNewObject(object obj)
@@ -722,6 +737,14 @@ namespace BTDB.ODBLayer
             }
         }
 
+        public ulong GetCommitUlong() => _keyValueTr.GetCommitUlong();
+        public void SetCommitUlong(ulong value) => _keyValueTr.SetCommitUlong(value);
+
+        public void NextCommitTemporaryCloseTransactionLog()
+        {
+            _keyValueTr.NextCommitTemporaryCloseTransactionLog();
+        }
+
         public void Commit()
         {
             try
@@ -813,29 +836,217 @@ namespace BTDB.ODBLayer
             }
         }
 
+        IDictionary<string, FieldBuilder> DefineProperties(RelationInfo relationInfo, IILDynamicType classImpl,
+                                                           Type createdType)
+        {
+            var apartFields = new Dictionary<string, FieldBuilder>();
+            var methods = createdType.GetMethods();
+            foreach (var method in methods)
+            {
+                var name = method.Name;
+                if (!name.StartsWith("get_") && !name.StartsWith("set_"))
+                    continue;
+                FieldBuilder field;
+                var propName = method.Name.Substring(4);
+
+                if (!relationInfo.ApartFields.ContainsKey(propName))
+                    throw new BTDBException($"Invalid property name {propName}.");
+
+                if (!apartFields.TryGetValue(propName, out field))
+                    apartFields[propName] = field = classImpl.DefineField("_" + propName, method.ReturnType,
+                        FieldAttributes.Private);
+                var reqMethod = classImpl.DefineMethod(method.Name, method.ReturnType,
+                    method.GetParameters().Select(pi => pi.ParameterType).ToArray(),
+                    MethodAttributes.Virtual | MethodAttributes.Public);
+
+                if (method.Name.StartsWith("get_"))
+                    reqMethod.Generator.Ldarg(0).Ldfld(field).Ret();
+                else if (method.Name.StartsWith("set_"))
+                    reqMethod.Generator.Ldarg(0).Ldarg(1).Stfld(field).Ret();
+                classImpl.DefineMethodOverride(reqMethod, method);
+            }
+            return apartFields;
+        }
+
         public Func<IObjectDBTransaction, T> InitRelation<T>(string relationName)
         {
             var interfaceType = typeof(T);
-            var classImpl = ILBuilder.Instance.NewType("Relation" + relationName, typeof(object),new [] { interfaceType });
-            var transactionField = classImpl.DefineField("transaction", typeof(IInternalObjectDBTransaction), System.Reflection.FieldAttributes.InitOnly | System.Reflection.FieldAttributes.Public);
-            var constructorMethod = classImpl.DefineConstructor(new[] { typeof(IObjectDBTransaction) });
+            var relationInfo = _owner.RelationsInfo.CreateByName(this, relationName, interfaceType);
+            var relationDBManipulatorType = typeof(RelationDBManipulator<>).MakeGenericType(relationInfo.ClientType);
+
+            var classImpl = ILBuilder.Instance.NewType("Relation" + relationName, relationDBManipulatorType, new[] { interfaceType });
+            var constructorMethod = classImpl.DefineConstructor(new[] { typeof(IObjectDBTransaction), typeof(RelationInfo) });
             var il = constructorMethod.Generator;
-            // super.ctor();
-            il.Ldarg(0).Call(() => new object());
-            // this.transaction = (IInternalObjectDBTransaction)arg0; return;
-            il.Ldarg(0).Ldarg(1).Castclass(typeof(IInternalObjectDBTransaction)).Stfld(transactionField).Ret();
+            // super.ctor(transaction, relationInfo);
+            il.Ldarg(0).Ldarg(1).Ldarg(2).Call(relationDBManipulatorType.GetConstructor(new[] { typeof(IObjectDBTransaction), typeof(RelationInfo) }))
+            .Ret();
+            var apartFields = DefineProperties(relationInfo, classImpl, interfaceType);
             var methods = interfaceType.GetMethods();
             foreach (var method in methods)
             {
-                var reqMethod = classImpl.DefineMethod(method.Name, method.ReturnType, method.GetParameters().Select(pi => pi.ParameterType).ToArray(), System.Reflection.MethodAttributes.Virtual | System.Reflection.MethodAttributes.Public);
+                if (method.Name.StartsWith("get_") || method.Name.StartsWith("set_"))
+                    continue;
+                var reqMethod = classImpl.DefineMethod("_R_" + method.Name, method.ReturnType,
+                    method.GetParameters().Select(pi => pi.ParameterType).ToArray(), MethodAttributes.Virtual | MethodAttributes.Public);
+                if (method.Name.StartsWith("RemoveBy") || method.Name.StartsWith("FindBy"))
+                {
+                    relationInfo.SaveKeyBytesAndCallMethod(reqMethod.Generator, relationDBManipulatorType, method.Name,
+                        method.GetParameters(), method.ReturnType, apartFields);
+                }
+                else if (method.Name == "ListById") //list by primary key
+                {
+                    var parameters = method.GetParameters();
+                    var advEnumParamOrder = (ushort)parameters.Length;
+                    var advEnumParam = parameters[advEnumParamOrder - 1].ParameterType;
+                    var advEnumParamType = advEnumParam.GenericTypeArguments[0];
+
+                    var emptyBufferLoc = reqMethod.Generator.DeclareLocal(typeof(ByteBuffer));
+                    var prefixParamCount = method.GetParameters().Length - 1;
+
+                    var pkFields = relationInfo.ClientRelationVersionInfo.GetPrimaryKeyFields();
+                    var field = pkFields[prefixParamCount];
+                    
+                    reqMethod.Generator
+                        .Ldarg(0);
+                    relationInfo.SavePKListPrefixBytes(reqMethod.Generator, method.Name,
+                        method.GetParameters(), apartFields);
+                    reqMethod.Generator
+                        .LdcI4(prefixParamCount + relationInfo.ApartFields.Count)
+                        .Ldarg(advEnumParamOrder).Ldfld(advEnumParam.GetField("Order"))
+                        .Ldarg(advEnumParamOrder).Ldfld(advEnumParam.GetField("StartProposition"));
+                    relationInfo.FillBufferWhenNotIgnoredKeyPropositionIl(advEnumParamOrder, field, emptyBufferLoc,
+                        advEnumParam.GetField("Start"), reqMethod.Generator);
+                    reqMethod.Generator
+                        .Ldarg(advEnumParamOrder).Ldfld(advEnumParam.GetField("EndProposition"));
+                    relationInfo.FillBufferWhenNotIgnoredKeyPropositionIl(advEnumParamOrder, field, emptyBufferLoc,
+                        advEnumParam.GetField("End"), reqMethod.Generator);
+
+                    if (typeof(IEnumerator<>).MakeGenericType(relationInfo.ClientType).IsAssignableFrom(method.ReturnType))
+                    {
+                        //return new RelationAdvancedEnumerator<T>(relationManipulator,
+                        //    prefixBytes, prefixFieldCount,
+                        //    order,
+                        //    startKeyProposition, startKeyBytes,
+                        //    endKeyProposition, endKeyBytes, secondaryKeyIndex);
+                        var enumType = typeof(RelationAdvancedEnumerator<>).MakeGenericType(relationInfo.ClientType);
+                        var advancedEnumeratorCtor = enumType.GetConstructors()[0];
+                        reqMethod.Generator.Newobj(advancedEnumeratorCtor);
+                    }
+                    else if (typeof(IOrderedDictionaryEnumerator<,>).MakeGenericType(advEnumParamType, relationInfo.ClientType)
+                        .IsAssignableFrom(method.ReturnType))
+                    {
+                        reqMethod.Generator
+                            .LdcI4(1); //init key reader
+
+                        //return new RelationAdvancedOrderedEnumerator<T>(relationManipulator,
+                        //    prefixBytes, prefixFieldCount,
+                        //    order,
+                        //    startKeyProposition, startKeyBytes,
+                        //    endKeyProposition, endKeyBytes, secondaryKeyIndex, initKeyReader);
+                        var enumType = typeof(RelationAdvancedOrderedEnumerator<,>).MakeGenericType(advEnumParamType, relationInfo.ClientType);
+                        var advancedEnumeratorCtor = enumType.GetConstructors()[0];
+                        reqMethod.Generator.Newobj(advancedEnumeratorCtor);
+                    }
+                    else
+                    {
+                        throw new BTDBException("Invalid method " + method.Name);
+                    }
+                }
+                else if (method.Name.StartsWith("ListBy")) //ListBy{Name}(tenantId, .., AdvancedEnumeratorParam)
+                {
+                    var parameters = method.GetParameters();
+                    var advEnumParamOrder = (ushort)parameters.Length;
+                    var advEnumParam = parameters[advEnumParamOrder - 1].ParameterType;
+                    var advEnumParamType = advEnumParam.GenericTypeArguments[0];
+
+                    var emptyBufferLoc = reqMethod.Generator.DeclareLocal(typeof(ByteBuffer));
+                    var secondaryKeyIndex = relationInfo.ClientRelationVersionInfo.GetSecondaryKeyIndex(method.Name.Substring(6));
+                    var prefixParamCount = method.GetParameters().Length - 1;
+
+                    var skFields = relationInfo.ClientRelationVersionInfo.SecondaryKeys[secondaryKeyIndex].Fields;
+                    var skField = skFields[prefixParamCount];
+                    TableFieldInfo field;
+                    if (skField.IsFromPrimaryKey)
+                        field = relationInfo.ClientRelationVersionInfo.GetPrimaryKeyFields().ToArray()[skField.Index];
+                    else
+                        field = relationInfo.ClientRelationVersionInfo.GetSecondaryKeyFields(secondaryKeyIndex).ToArray()[skField.Index];
+
+                    reqMethod.Generator
+                        .Ldarg(0);
+                    relationInfo.SaveListPrefixBytes(secondaryKeyIndex, reqMethod.Generator, method.Name,
+                        method.GetParameters(), apartFields);
+                    reqMethod.Generator
+                        .LdcI4(prefixParamCount + relationInfo.ApartFields.Count)
+                        .Ldarg(advEnumParamOrder).Ldfld(advEnumParam.GetField("Order"))
+                        .Ldarg(advEnumParamOrder).Ldfld(advEnumParam.GetField("StartProposition"));
+                    relationInfo.FillBufferWhenNotIgnoredKeyPropositionIl(advEnumParamOrder, field,
+                                emptyBufferLoc, advEnumParam.GetField("Start"), reqMethod.Generator);
+                    reqMethod.Generator
+                        .Ldarg(advEnumParamOrder).Ldfld(advEnumParam.GetField("EndProposition"));
+                    relationInfo.FillBufferWhenNotIgnoredKeyPropositionIl(advEnumParamOrder, field,
+                        emptyBufferLoc, advEnumParam.GetField("End"), reqMethod.Generator);
+                    reqMethod.Generator
+                        .LdcI4((int)secondaryKeyIndex);
+
+                    if (typeof(IEnumerator<>).MakeGenericType(relationInfo.ClientType).IsAssignableFrom(method.ReturnType))
+                    {
+                        //return new RelationAdvancedSecondaryKeyEnumerator<T>(relationManipulator,
+                        //    prefixBytes, prefixFieldCount,
+                        //    order,
+                        //    startKeyProposition, startKeyBytes,
+                        //    endKeyProposition, endKeyBytes, secondaryKeyIndex);
+                        var enumType = typeof(RelationAdvancedSecondaryKeyEnumerator<>).MakeGenericType(relationInfo.ClientType);
+                        var advancedEnumeratorCtor = enumType.GetConstructors()[0];
+                        reqMethod.Generator.Newobj(advancedEnumeratorCtor);
+                    }
+                    else if (typeof(IOrderedDictionaryEnumerator<,>).MakeGenericType(advEnumParamType, relationInfo.ClientType)
+                        .IsAssignableFrom(method.ReturnType))
+                    {
+                        //return new RelationAdvancedOrderedSecondaryKeyEnumerator<T>(relationManipulator,
+                        //    prefixBytes, prefixFieldCount,
+                        //    order,
+                        //    startKeyProposition, startKeyBytes,
+                        //    endKeyProposition, endKeyBytes, secondaryKeyIndex);
+                        var enumType = typeof(RelationAdvancedOrderedSecondaryKeyEnumerator<,>).MakeGenericType(advEnumParamType, relationInfo.ClientType);
+                        var advancedEnumeratorCtor = enumType.GetConstructors()[0];
+                        reqMethod.Generator.Newobj(advancedEnumeratorCtor);
+                    }
+                    else
+                    {
+                        throw new BTDBException("Invalid method " + method.Name);
+                    }
+                }
+                else //call the same method name with the same parameters
+                {
+                    var methodParams = method.GetParameters();
+                    int paramCount = methodParams.Length;
+                    for (ushort i = 0; i <= paramCount; i++)
+                        reqMethod.Generator.Ldarg(i);
+                    var methodInfo = relationDBManipulatorType.GetMethod(method.Name);
+                    var calledMethodParams = methodInfo.GetParameters();
+                    if (methodParams.Length != calledMethodParams.Length)
+                        throw new BTDBException($"Method {method} expects {calledMethodParams.Length} parameters count.");
+                    reqMethod.Generator.Callvirt(methodInfo);
+                }
                 reqMethod.Generator.Ret();
                 classImpl.DefineMethodOverride(reqMethod, method);
             }
             var classImplType = classImpl.CreateType();
-            var creatorMethod = ILBuilder.Instance.NewMethod<Func<IObjectDBTransaction, T>>("RelationCreator" + relationName);
-            // return (T)new ClassImpl(arg);
-            creatorMethod.Generator.Ldarg(0).Newobj(classImplType.GetConstructors()[0]).Castclass(interfaceType).Ret();
-            return creatorMethod.Create();
+
+            return BuildRelationCreatorInstance<T>(classImplType, relationName, relationInfo);
+        }
+
+        Func<IObjectDBTransaction, T> BuildRelationCreatorInstance<T>(Type classImplType, string relationName, RelationInfo relationInfo)
+        {
+            var methodBuilder = ILBuilder.Instance.NewMethod("RelationFactory" + relationName, typeof(Func<IObjectDBTransaction, T>), typeof(RelationInfo));
+            var ilGenerator = methodBuilder.Generator;
+            ilGenerator
+                .Ldarg(1)
+                .Ldarg(0)
+                .Newobj(classImplType.GetConstructor(new[] { typeof(IObjectDBTransaction), typeof(RelationInfo) }))
+                .Castclass(typeof(T))
+                .Ret();
+            return (Func<IObjectDBTransaction, T>)methodBuilder.Create(relationInfo);
         }
     }
 }

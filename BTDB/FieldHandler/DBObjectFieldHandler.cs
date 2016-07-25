@@ -69,7 +69,7 @@ namespace BTDB.FieldHandler
 
         public bool IsCompatibleWith(Type type, FieldHandlerOptions options)
         {
-            if (options.HasFlag(FieldHandlerOptions.Orderable)) return false;
+            if ((options & FieldHandlerOptions.Orderable) != 0) return false;
             return IsCompatibleWith(type);
         }
 
@@ -142,6 +142,17 @@ namespace BTDB.FieldHandler
         public void Init(IILGen ilGenerator, Action<IILGen> pushReaderCtx)
         {
             ilGenerator.Newobj(typeof(DBIndirect<>).MakeGenericType(_type).GetConstructor(Type.EmptyTypes));
+        }
+
+        public bool FreeContent(IILGen ilGenerator, Action<IILGen> pushReaderOrCtx)
+        {
+            var tableInfo = ((ObjectDB)_objectDB).TablesInfo.FindByType(HandledType());
+            //decides upon current version  (null for object types never stored in DB)
+            var needsContent = tableInfo == null || tableInfo.GetFreeContent(tableInfo.ClientTypeVersion).Item1;
+            ilGenerator
+                .Do(pushReaderOrCtx)
+                .Callvirt(() => default(IReaderCtx).FreeContentInNativeObject());
+            return needsContent;
         }
     }
 }

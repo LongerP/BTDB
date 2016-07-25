@@ -130,5 +130,15 @@ namespace BTDB.Service
         {
             return _reader;
         }
+
+        public void RegisterDict(ulong dictId)
+        {
+            throw new InvalidOperationException();
+        }
+
+        public void FreeContentInNativeObject()
+        {
+            throw new InvalidOperationException();
+        }
     }
 }

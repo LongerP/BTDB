@@ -28,6 +28,14 @@ namespace BTDB.ODBLayer
         void DeleteAll<T>() where T : class;
         void DeleteAll(Type type);
 
+        ulong GetCommitUlong();
+        void SetCommitUlong(ulong value);
+
+        /// <summary>
+        /// This creates safe checkpoint for next open in transaction log
+        /// </summary>
+        void NextCommitTemporaryCloseTransactionLog();
+
         void Commit();
 
         Func<IObjectDBTransaction, T> InitRelation<T>(string relationName);

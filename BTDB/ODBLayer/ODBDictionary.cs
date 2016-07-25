@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using BTDB.Buffer;
 using BTDB.FieldHandler;
+using BTDB.IL;
 using BTDB.KVDBLayer;
 using BTDB.StreamLayer;
 
@@ -43,21 +44,7 @@ namespace BTDB.ODBLayer
             _count = -1;
         }
 
-        public ODBDictionary(IInternalObjectDBTransaction tr, ODBDictionaryConfiguration config)
-        {
-            _tr = tr;
-            _keyHandler = config.KeyHandler;
-            _valueHandler = config.ValueHandler;
-            _id = tr.AllocateDictionaryId();
-            GeneratePrefix();
-            _keyReader = (Func<AbstractBufferedReader, IReaderCtx, TKey>)config.KeyReader;
-            _keyWriter = (Action<TKey, AbstractBufferedWriter, IWriterCtx>)config.KeyWriter;
-            _valueReader = (Func<AbstractBufferedReader, IReaderCtx, TValue>)config.ValueReader;
-            _valueWriter = (Action<TValue, AbstractBufferedWriter, IWriterCtx>)config.ValueWriter;
-            _keyValueTr = _tr.KeyValueDBTransaction;
-            _keyValueTrProtector = _tr.TransactionProtector;
-            _count = -1;
-        }
+        public ODBDictionary(IInternalObjectDBTransaction tr, ODBDictionaryConfiguration config) : this(tr, config, tr.AllocateDictionaryId()) { }
 
         static void ThrowModifiedDuringEnum()
         {
@@ -78,6 +65,82 @@ namespace BTDB.ODBLayer
                         goodDict.Add(pair.Key, pair.Value);
             }
             ctx.Writer().WriteVUInt64(goodDict._id);
+        }
+
+        public static void DoFreeContent(IReaderCtx ctx, ulong id, int cfgId)
+        {
+            var dbctx = (DBReaderCtx)ctx;
+            var tr = dbctx.GetTransaction();
+            var dict = new ODBDictionary<TKey, TValue>(tr, (ODBDictionaryConfiguration)dbctx.FindInstance(cfgId), id);
+            dict.FreeContent(ctx, cfgId);
+        }
+
+        void FreeContent(IReaderCtx readerCtx, int cfgId)
+        {
+            var config = (ODBDictionaryConfiguration)((IInstanceRegistry)readerCtx).FindInstance(cfgId);
+            var ctx = (DBReaderWithFreeInfoCtx)readerCtx;
+
+            if (config.FreeContent == null)
+            {
+                var method = ILBuilder.Instance
+                .NewMethod<Action<IInternalObjectDBTransaction, AbstractBufferedReader, IList<ulong>>>(
+                    $"IDictFinder_Cfg_{cfgId}");
+                var ilGenerator = method.Generator;
+
+                var readerLoc = ilGenerator.DeclareLocal(typeof(IReaderCtx));
+                ilGenerator
+                    .Ldarg(0)
+                    .Ldarg(1)
+                    .Ldarg(2)
+                    .Newobj(() => new DBReaderWithFreeInfoCtx(null, null, null))
+                    .Stloc(readerLoc);
+
+                Action<IILGen> readerOrCtx;
+                if (_valueHandler.NeedsCtx())
+                    readerOrCtx = il => il.Ldloc(readerLoc);
+                else
+                    readerOrCtx = il => il.Ldarg(1);
+                _valueHandler.FreeContent(ilGenerator, readerOrCtx);
+                ilGenerator.Ret();
+                config.FreeContent = method.Create();
+            }
+
+            var findIDictAction = (Action<IInternalObjectDBTransaction, AbstractBufferedReader, IList<ulong>>)config.FreeContent;
+
+            long prevProtectionCounter = 0;
+            var prevModificationCounter = 0;
+            long pos = 0;
+            while (true)
+            {
+                _keyValueTrProtector.Start();
+                if (pos == 0)
+                {
+                    prevModificationCounter = _modificationCounter;
+                    _keyValueTr.SetKeyPrefix(_prefix);
+                    if (!_keyValueTr.FindFirstKey()) break;
+                }
+                else
+                {
+                    if (_keyValueTrProtector.WasInterupted(prevProtectionCounter))
+                    {
+                        if (prevModificationCounter != _modificationCounter)
+                            ThrowModifiedDuringEnum();
+                        _keyValueTr.SetKeyPrefix(_prefix);
+                        if (!_keyValueTr.SetKeyIndex(pos)) break;
+                    }
+                    else
+                    {
+                        if (!_keyValueTr.FindNextKey()) break;
+                    }
+                }
+
+                prevProtectionCounter = _keyValueTrProtector.ProtectionCounter;
+                var valueBytes = _keyValueTr.GetValueAsByteArray();
+                var valueReader = new ByteArrayReader(valueBytes);
+                findIDictAction(ctx.GetTransaction(), valueReader, ctx.DictIds);
+
+                pos++;
+            }
         }
 
         void GeneratePrefix()
@@ -161,7 +224,7 @@ namespace BTDB.ODBLayer
         {
             var writer = new ByteBufferWriter();
             IWriterCtx ctx = null;
-            if (_keyHandler.NeedsCtx()) ctx = new DBWriterCtx(_tr, writer);
+            if (_keyHandler.NeedsCtx()) ctx = new DBWriterCtx(_tr, writer, false);
             _keyWriter(key, writer, ctx);
             return writer.Data.ToByteArray();
         }
@@ -170,7 +233,7 @@ namespace BTDB.ODBLayer
         {
             var writer = new ByteBufferWriter();
             IWriterCtx ctx = null;
-            if (_valueHandler.NeedsCtx()) ctx = new DBWriterCtx(_tr, writer);
+            if (_valueHandler.NeedsCtx()) ctx = new DBWriterCtx(_tr, writer, false);
             _valueWriter(value, writer, ctx);
             return writer.Data.ToByteArray();
         }

@@ -187,6 +187,5 @@ namespace BTDBTest
             _db.Dispose();
             _lowDb.Dispose();
         }
-
     }
 }

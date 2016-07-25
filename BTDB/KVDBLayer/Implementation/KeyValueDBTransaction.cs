@@ -17,6 +17,7 @@ namespace BTDB.KVDBLayer
         long _prefixKeyStart;
         long _prefixKeyCount;
         long _keyIndex;
+        bool _temporaryCloseTransactionLog;
 
         public KeyValueDBTransaction(KeyValueDB keyValueDB, IBTreeRootNode btreeRoot, bool writting, bool readOnly)
         {
@@ -295,6 +296,26 @@ namespace BTDB.KVDBLayer
             return _writting;
         }
 
+        public ulong GetCommitUlong()
+        {
+            return BtreeRoot.CommitUlong;
+        }
+
+        public void SetCommitUlong(ulong value)
+        {
+            if (BtreeRoot.CommitUlong != value)
+            {
+                MakeWrittable();
+                BtreeRoot.CommitUlong = value;
+            }
+        }
+
+        public void NextCommitTemporaryCloseTransactionLog()
+        {
+            MakeWrittable();
+            _temporaryCloseTransactionLog = true;
+        }
+
         public void Commit()
         {
             if (BtreeRoot == null) throw new BTDBException("Transaction already commited or disposed");
@@ -309,7 +330,7 @@ namespace BTDB.KVDBLayer
             }
             else if (_writting)
             {
-                _keyValueDB.CommitWrittingTransaction(currentBtreeRoot);
+                _keyValueDB.CommitWrittingTransaction(currentBtreeRoot, _temporaryCloseTransactionLog);
                 _writting = false;
             }
         }

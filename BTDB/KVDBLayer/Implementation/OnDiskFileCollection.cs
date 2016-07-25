@@ -184,7 +184,7 @@ namespace BTDB.KVDBLayer
                 return new Reader(this);
             }
 
-            public void RandomRead(byte[] data, int offset, int size, ulong position)
+            public void RandomRead(byte[] data, int offset, int size, ulong position, bool doNotCache)
             {
                 lock (_lock)
                 {
@@ -311,6 +311,11 @@ namespace BTDB.KVDBLayer
         public IEnumerable<IFileCollectionFile> Enumerate()
         {
             return _files.Values;
+        }
+
+        public void ConcurentTemporaryTruncate(uint index, uint offset)
+        {
+            // Nothing to do
         }
 
         public void Dispose()

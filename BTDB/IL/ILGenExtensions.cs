@@ -83,6 +83,15 @@ namespace BTDB.IL
             return il;
         }
 
+        public static IILGen Starg(this IILGen il, ushort parameterIndex)
+        {
+            if (parameterIndex <= 255)
+                il.Emit(OpCodes.Starg_S, (byte)parameterIndex);
+            else
+                il.Emit(OpCodes.Starg, parameterIndex);
+            return il;
+        }
+
         public static IILGen Ldfld(this IILGen il, FieldInfo fieldInfo)
         {
             il.Emit(OpCodes.Ldfld, fieldInfo);
@@ -187,6 +196,24 @@ namespace BTDB.IL
             return il;
         }
 
+        public static IILGen Constrained(this IILGen il, Type type)
+        {
+            il.Emit(OpCodes.Constrained, type);
+            return il;
+        }
+
+        public static IILGen Blt(this IILGen il, IILLabel targetLabel)
+        {
+            il.Emit(OpCodes.Blt, targetLabel);
+            return il;
+        }
+
+        public static IILGen Bgt(this IILGen il, IILLabel targetLabel)
+        {
+            il.Emit(OpCodes.Bgt, targetLabel);
+            return il;
+        }
+
         public static IILGen Brfalse(this IILGen il, IILLabel targetLabel)
         {
             il.Emit(OpCodes.Brfalse, targetLabel);
@@ -232,6 +259,12 @@ namespace BTDB.IL
         public static IILGen BeqS(this IILGen il, IILLabel targetLabel)
         {
             il.Emit(OpCodes.Beq_S, targetLabel);
+            return il;
+        }
+
+        public static IILGen Beq(this IILGen il, IILLabel targetLabel)
+        {
+            il.Emit(OpCodes.Beq, targetLabel);
             return il;
         }
 
@@ -505,6 +538,12 @@ namespace BTDB.IL
         public static IILGen UnboxAny(this IILGen il, Type anyType)
         {
             il.Emit(OpCodes.Unbox_Any, anyType);
+            return il;
+        }
+
+        public static IILGen Break(this IILGen il)
+        {
+            il.Emit(OpCodes.Break);
             return il;
         }
     }

@@ -61,6 +61,12 @@ namespace BTDB.FieldHandler
             return this;
         }
 
+        public bool FreeContent(IILGen ilGenerator, Action<IILGen> pushReaderOrCtx)
+        {
+            Skip(ilGenerator, pushReaderOrCtx);
+            return false;
+        }
+
         class ByteBufferHandler : IFieldHandler
         {
             readonly ByteArrayFieldHandler _fieldHandler;
@@ -112,6 +118,12 @@ namespace BTDB.FieldHandler
             public IFieldHandler SpecializeSaveForType(Type type)
             {
                 throw new InvalidOperationException();
+            }
+
+            public bool FreeContent(IILGen ilGenerator, Action<IILGen> pushReaderOrCtx)
+            {
+                _fieldHandler.Skip(ilGenerator, pushReaderOrCtx);
+                return false;
             }
         }
 

@@ -276,6 +276,25 @@ namespace BTDB.KVDBLayer
             return _writting;
         }
 
+        public ulong GetCommitUlong()
+        {
+            return BtreeRoot.CommitUlong;
+        }
+
+        public void SetCommitUlong(ulong value)
+        {
+            if (BtreeRoot.CommitUlong != value)
+            {
+                MakeWrittable();
+                BtreeRoot.CommitUlong = value;
+            }
+        }
+
+        public void NextCommitTemporaryCloseTransactionLog()
+        {
+            // There is no transaction log ...
+        }
+
         public void Commit()
         {
             if (BtreeRoot == null) throw new BTDBException("Transaction already commited or disposed");

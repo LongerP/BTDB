@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using BTDB.FieldHandler;
 using BTDB.IL;
+using BTDB.KVDBLayer;
 using BTDB.StreamLayer;
 
 namespace BTDB.ODBLayer
@@ -104,7 +105,7 @@ namespace BTDB.ODBLayer
 
         public static bool IsCompatibleWithStatic(Type type, FieldHandlerOptions options)
         {
-            if (options.HasFlag(FieldHandlerOptions.Orderable)) return false;
+            if ((options & FieldHandlerOptions.Orderable) != 0) return false;
             if (!type.IsGenericType) return false;
             return IsCompatibleWithCore(type);
         }
@@ -211,7 +212,7 @@ namespace BTDB.ODBLayer
             }
             var specializedKeyHandler = _keysHandler.SpecializeLoadForType(arguments[0], wantedKeyHandler);
             var specializedValueHandler = _valuesHandler.SpecializeLoadForType(arguments[1], wantedValueHandler);
-            if (wantedKeyHandler == specializedKeyHandler && (wantedValueHandler == specializedValueHandler || wantedValueHandler.HandledType()==specializedValueHandler.HandledType()))
+            if (wantedKeyHandler == specializedKeyHandler && (wantedValueHandler == specializedValueHandler || wantedValueHandler.HandledType() == specializedValueHandler.HandledType()))
             {
                 return typeHandler;
             }
@@ -238,6 +239,45 @@ namespace BTDB.ODBLayer
         {
             yield return _keysHandler;
             yield return _valuesHandler;
+        }
+
+        public bool FreeContent(IILGen ilGenerator, Action<IILGen> pushReaderOrCtx)
+        {
+            var fakeMethod = ILBuilder.Instance.NewMethod<Action>("Relation_fake");
+            var fakeGenerator = fakeMethod.Generator;
+            if (_keysHandler.FreeContent(fakeGenerator, _ => { }))
+                throw new BTDBException("Not supported IDictionary in IDictionary key");
+            var containsNestedIDictionaries = _valuesHandler.FreeContent(fakeGenerator, _ => { });
+            if (!containsNestedIDictionaries)
+            {
+                ilGenerator
+                    .Do(pushReaderOrCtx)
+                    .Castclass(typeof (IDBReaderCtx))
+                    .Do(Extensions.PushReaderFromCtx(pushReaderOrCtx))
+                    .Callvirt(() => default(AbstractBufferedReader).ReadVUInt64())
+                    .Callvirt(() => default(IDBReaderCtx).RegisterDict(0ul));
+            }
+            else
+            {
+                var genericArguments = _type.GetGenericArguments();
+                var instanceType = typeof(ODBDictionary<,>).MakeGenericType(genericArguments);
+
+                var dictId = ilGenerator.DeclareLocal(typeof (ulong));
+                ilGenerator
+                    .Do(pushReaderOrCtx)
+                    .Castclass(typeof(IDBReaderCtx))
+                    .Do(Extensions.PushReaderFromCtx(pushReaderOrCtx))
+                    .Callvirt(() => default(AbstractBufferedReader).ReadVUInt64())
+                    .Stloc(dictId)
+                    .Ldloc(dictId)
+                    .Callvirt(() => default(IDBReaderCtx).RegisterDict(0ul))
+                    .Do(pushReaderOrCtx)
+                    .Ldloc(dictId)
+                    .LdcI4(_configurationId)
+                    //ODBDictionary.DoFreeContent(IReaderCtx ctx, ulong id, int cfgId)
+                    .Call(instanceType.GetMethod("DoFreeContent"));
+            }
+            return true;
         }
     }
 }

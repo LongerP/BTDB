@@ -24,6 +24,7 @@ namespace BTDB.ODBLayer
         Action<IInternalObjectDBTransaction, DBObjectMetadata, object> _initializer;
         Action<IInternalObjectDBTransaction, DBObjectMetadata, AbstractBufferedWriter, object> _saver;
         readonly ConcurrentDictionary<uint, Action<IInternalObjectDBTransaction, DBObjectMetadata, AbstractBufferedReader, object>> _loaders = new ConcurrentDictionary<uint, Action<IInternalObjectDBTransaction, DBObjectMetadata, AbstractBufferedReader, object>>();
+        readonly ConcurrentDictionary<uint, Tuple<bool, Action<IInternalObjectDBTransaction, DBObjectMetadata, AbstractBufferedReader, IList<ulong>>>> _freeContent = new ConcurrentDictionary<uint, Tuple<bool, Action<IInternalObjectDBTransaction, DBObjectMetadata, AbstractBufferedReader, IList<ulong>>>>();
         long _singletonOid;
         long _cachedSingletonTrNum;
         byte[] _cachedSingletonContent;
@@ -217,7 +218,8 @@ namespace BTDB.ODBLayer
                 ilGenerator
                     .Ldarg(0)
                     .Ldarg(2)
-                    .Newobj(() => new DBWriterCtx(null, null))
+                    .LdcI4(0)
+                    .Newobj(() => new DBWriterCtx(null, null, false))
                     .Stloc(1);
             }
             var props = ClientType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -254,7 +256,7 @@ namespace BTDB.ODBLayer
             {
                 if (pi.GetCustomAttributes(typeof(NotStoredAttribute), true).Length != 0) continue;
                 if (pi.GetIndexParameters().Length != 0) continue;
-                fields.Add(TableFieldInfo.Build(Name, pi, _tableInfoResolver.FieldHandlerFactory));
+                fields.Add(TableFieldInfo.Build(Name, pi, _tableInfoResolver.FieldHandlerFactory, FieldHandlerOptions.None));
             }
             var tvi = new TableVersionInfo(fields.ToArray());
             if (LastPersistedVersion == 0)
@@ -368,6 +370,45 @@ namespace BTDB.ODBLayer
             }
             ilGenerator.Ret();
             return method.Create();
+        }
+
+        internal Tuple<bool, Action<IInternalObjectDBTransaction, DBObjectMetadata, AbstractBufferedReader, IList<ulong>>> GetFreeContent(uint version)
+        {
+            return _freeContent.GetOrAdd(version, CreateFreeContent);
+        }
+
+        Tuple<bool, Action<IInternalObjectDBTransaction, DBObjectMetadata, AbstractBufferedReader, IList<ulong>>> CreateFreeContent(uint version)
+        {
+            EnsureClientTypeVersion();
+            var method = ILBuilder.Instance.NewMethod<Action<IInternalObjectDBTransaction, DBObjectMetadata, 
+                AbstractBufferedReader, IList<ulong>>>($"FreeContent_{Name}_{version}");
+            var ilGenerator = method.Generator;
+            var tableVersionInfo = _tableVersions.GetOrAdd(version, version1 => _tableInfoResolver.LoadTableVersionInfo(_id, version1, Name));
+            var needsFreeContent = false;
+            var anyNeedsCtx = tableVersionInfo.NeedsCtx();
+            if (anyNeedsCtx)
+            {
+                ilGenerator.DeclareLocal(typeof(IReaderCtx));
+                ilGenerator
+                    .Ldarg(0)
+                    .Ldarg(2)
+                    .Ldarg(3)
+                    .Newobj(() => new DBReaderWithFreeInfoCtx(null, null, null))
+                    .Stloc(0);
+            }
+            for (int fi = 0; fi < tableVersionInfo.FieldCount; fi++)
+            {
+                var srcFieldInfo = tableVersionInfo[fi];
+                Action<IILGen> readerOrCtx;
+                if (srcFieldInfo.Handler.NeedsCtx())
+                    readerOrCtx = il => il.Ldloc(0);
+                else
+                    readerOrCtx = il => il.Ldarg(2);
+                var needsFree = srcFieldInfo.Handler.FreeContent(ilGenerator, readerOrCtx);
+                needsFreeContent |= needsFree;
+            }
+            ilGenerator.Ret();
+            return Tuple.Create(needsFreeContent, method.Create());
         }
 
         static string GetPersistantName(PropertyInfo p)
