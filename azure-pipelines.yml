@@ -1,5 +1,6 @@
 variables:
   buildConfiguration: 'Release'
+  system.debug: true
 
 jobs:
 - job: 'netcore_linux'
