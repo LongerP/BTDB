@@ -5,8 +5,10 @@ jobs:
 - job: 'netcore_linux'
   container: microsoft/dotnet:latest
   steps:
-  - script:
-      dotnet build --configuration $(buildConfiguration)
+  - task: DotNetCoreCLI@2
+    inputs:
+      command: 'build'
+      arguments: '--configuration $(buildConfiguration)'
   - task: DotNetCoreCLI@2
     inputs:
       command: test
