@@ -3,8 +3,7 @@ variables:
 
 jobs:
 - job: 'netcore_linux'
-  pool: 
-    vmImage: 'Ubuntu 16.04'
+  container: microsoft/dotnet:latest
   steps:
   - script:
       dotnet build --configuration $(buildConfiguration)
