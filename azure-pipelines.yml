@@ -10,11 +10,13 @@ jobs:
     inputs:
       command: 'build'
       arguments: '-f netcoreapp2.1 -c Release /m:1 --no-incremental'
+    displayName: Build
   - task: DotNetCoreCLI@2
     inputs:
       command: test
-      projects: '**/*Test/*.csproj'
+      projects: 'BTDBTest/BTDBTest.csproj'
       arguments: '-f netcoreapp2.1 -c Release --no-build --no-restore'
+    displayName: BTDBTest
 
 - job: 'netcore_net471_win'
   pool: 
