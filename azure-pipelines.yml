@@ -9,12 +9,12 @@ jobs:
   - task: DotNetCoreCLI@2
     inputs:
       command: 'build'
-      arguments: '--configuration $(buildConfiguration)'
+      arguments: '-f netcoreapp2.1 -c Release /m:1 --no-incremental'
   - task: DotNetCoreCLI@2
     inputs:
       command: test
       projects: '**/*Test/*.csproj'
-      arguments: '--configuration $(buildConfiguration)'
+      arguments: '-f netcoreapp2.1 -c Release --no-build --no-restore'
 
 - job: 'netcore_net471_win'
   pool: 
